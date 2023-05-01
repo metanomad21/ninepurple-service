@@ -2,13 +2,12 @@ const ethers = require('ethers');
 const swapUtils = require('../utils/swap-utils');
 const commonUtils = require('../utils/common');
 const {httpCfg, dbCfg, providerURLCfg, adminKey, swapAddrCfg} = require('../conf/swapDatasCfg');
-// const withdrawData = require('../request/graph/obridge/withdrawData');
 
 const fs = require('fs');
 const path = require('path');
 const log4js = require("log4js");
 const db = require("../utils/db-utils");
-db.init(dbCfg.host, dbCfg.user, dbCfg.password, dbCfg.database);
+db.init(dbCfg.host, dbCfg.user, dbCfg.password, dbCfg.database, dbCfg.port);
 const express = require('express');
 const { lookup } = require('dns');
 var app = express();
@@ -19,7 +18,8 @@ var httpServer = app.listen(httpCfg.port, function () {
 });
 const DENOMINATOR_MAX = ethers.utils.parseEther("1");
 const NPC_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
-const WNPC_ADDRESS = "0xe7009A8E41E8d2101AFB6c9e40D123621c4DAfCe";
+const WNPC_ADDRESS = "0xDfA2C572F7201d19ef6D283Ad81F6Cc1CaCD0CA7";
+const ROUTER_ABI = require("../abis/UniswapV2Router02.json");
 
 /**
  * 
@@ -64,8 +64,11 @@ let logger = log4js.getLogger("[swapDatas]");
     let chainId = req.query.chainId;
     let addrIn = req.query.sellToken;
     let addrOut = req.query.buyToken;
-    let amountIn = req.query.sellAmount;      //ether style   
+    let amountIn = req.query.sellAmount;
+    let amountOut = req.query.buyAmount;
     let slippagePercentage = req.query.slippagePercentage;   
+    let affiliateAddress = req.query.affiliateAddress;   
+    let toAddress = req.query.takerAddress;   
 
     let returnData = {
         code:1,
@@ -76,7 +79,7 @@ let logger = log4js.getLogger("[swapDatas]");
     try{
 
         if(chainId == null || chainId == undefined || chainId == ""){
-            chainId = 9333;
+            chainId = 9686;
         }
         if(addrIn == null || addrIn == undefined || addrIn == ""){
             throw("invalid param addrIn");
@@ -84,6 +87,11 @@ let logger = log4js.getLogger("[swapDatas]");
         if(addrOut == null || addrOut == undefined || addrOut == ""){
             throw("invalid param addrOut");
         }
+        if(toAddress == null || toAddress == undefined || toAddress == ""){
+            // throw("invalid param toAddress");
+            toAddress = ethers.constants.AddressZero;
+        }
+
         let provider = getProvider(chainId);
         if(provider == null){
             throw("invalid param chainId:"+chainId);
@@ -98,7 +106,12 @@ let logger = log4js.getLogger("[swapDatas]");
         console.log("Addr in/out:", addrIn, addrOut);
         let wallet = new ethers.Wallet(adminKey, provider);
         console.log("Wallet Data:", wallet.address);
-        let routingRes = await swapUtils.getUniRouting(db, addrIn, amountIn.toString(), addrOut, provider, wallet);
+        let routingRes;
+        if(amountIn != null && amountIn != "" && amountIn != undefined) {
+            routingRes = await swapUtils.getUniRouting(db, addrIn, addrOut, amountIn.toString(), provider, wallet, 1);
+        } else {
+            routingRes = await swapUtils.getUniRouting(db, addrIn, addrOut, amountOut.toString(), provider, wallet, 0);
+        }
         returnData['code'] = 0;
         
         if(routingRes != null){
@@ -134,15 +147,37 @@ let logger = log4js.getLogger("[swapDatas]");
                 pathTokenAdds.push(routingRes['routing'][t].address);
             }
             let estimatedGas = 400000;
-            let feeIn = amountIn * 0.003;
+            let feeIn = routingRes['inAmount'] * 0.003;
+
+            let routerI = new ethers.utils.Interface(ROUTER_ABI);
+            let funcName;
+            let funcParam = [];
+            let deadline = parseInt(new Date().getTime()/1000) + 600;
+            let valueETH = 0;
+            if(addrIn == WNPC_ADDRESS){
+                funcName = "swapETHForExactTokens";
+                funcParam = [routingRes['outAmount'], pathTokenAdds, toAddress, deadline];
+                valueETH = routingRes['inAmount'];
+            }else if(addrOut == WNPC_ADDRESS) {
+                funcName = "swapExactTokensForETH";
+                funcParam = [routingRes['inAmount'], routingRes['outAmount'], pathTokenAdds, toAddress, deadline];
+            }else{
+                funcName = "swapExactTokensForTokens";
+                funcParam = [routingRes['inAmount'], routingRes['outAmount'], pathTokenAdds, toAddress, deadline];
+            }
+            let funcData = routerI.encodeFunctionData(
+                funcName, 
+                funcParam
+            );
+            console.log("Func data:", funcName, funcParam);
             returnData['data'] = {
                 "chainId": chainId,
                 "price": routingRes['price'],
                 "guaranteedPrice": routingRes['price'] * (1 - slippagePercentage),
                 "priceImpact": routingRes['priceImpact'],
                 "to": swapAddrCfg[chainId].address,
-                "data":"",
-                "value":0,
+                "data":funcData,
+                "value":valueETH,
                 "gas": estimatedGas,
                 "estimatedGas": estimatedGas,
                 "gasPrice": "1000000001",
@@ -151,7 +186,7 @@ let logger = log4js.getLogger("[swapDatas]");
                 "buyTokenAddress":addrOut,
                 "sellTokenAddress": addrIn,
                 "buyAmount":routingRes['outAmount'], 
-                "sellAmount": amountIn,
+                "sellAmount": routingRes['inAmount'],
                 "sources": [
                     {
                         "name": "9PurpleSwap",
@@ -165,13 +200,13 @@ let logger = log4js.getLogger("[swapDatas]");
                         "makerToken": addrOut,
                         "takerToken": addrIn,
                         "makerAmount": routingRes['outAmount'],
-                        "takerAmount": amountIn,
+                        "takerAmount": routingRes['inAmount'],
                         "fillData": {
                             "tokenAddressPath": pathTokenAdds,
                             "router": swapAddrCfg[chainId].address
                         },
                         "fill": {
-                            "input": amountIn,
+                            "input": routingRes['inAmount'],
                             "output": routingRes['outAmount'],
                             "adjustedOutput": "1",
                             "gas": estimatedGas
@@ -191,6 +226,64 @@ let logger = log4js.getLogger("[swapDatas]");
 
     }catch(error){
         logger.error("getSwapRoute:", error);
+        return res.status(400).send();
+    }
+
+});
+
+
+/**
+ * 获取代币信息
+ */
+ app.get('/searchToken',async function (req, res) {
+    let chainId = req.query.chainId;
+    let keywords = req.query.keywords;
+    
+    // let returnData = {
+    //     code:1,
+    //     data:[],
+    //     message:""
+    // };
+    
+    let returnTokens = [];
+
+    try{
+
+        if(chainId == null || chainId == undefined || chainId == ""){
+            chainId = 9686;
+        }
+        if(keywords == null || keywords == undefined || keywords == ""){
+            throw("invalid param keywords");
+        }
+
+        let searchSql = 
+        `SELECT DISTINCT * FROM 9purple_token_data
+        WHERE token_name LIKE '%${keywords}%' OR symbol LIKE '%${keywords}%' OR company LIKE '%${keywords}%';`;
+        console.log("searchSql:", searchSql);
+        let searchResult = await db.query(searchSql);
+        if(searchResult && searchResult.length > 0){
+            for(var i in searchResult) {
+                searchResult[i]['__v'] = i;
+                searchResult[i]['_id'] = searchResult[i]['id'];
+                searchResult[i]['addToIndex'] = false;
+                searchResult[i]['chainId'] = chainId;
+                searchResult[i]['checked'] = true;
+                searchResult[i]['coingeckoId'] = searchResult[i]['symbol'];
+                searchResult[i]['createdAt'] = searchResult[i]['created_at'];
+                searchResult[i]['impl'] = 'evm';
+                searchResult[i]['logoURI'] = 'http://common-asset.9purple.co/images/npay-scb-icon-128.png';
+                searchResult[i]['name'] = searchResult[i]['token_name'];
+                searchResult[i]['tokenIdOnNetwork'] = searchResult[i]['address'];
+                
+                returnTokens.push(searchResult[i]);
+            }
+            // returnData["code"] = 0;
+        }
+
+        return res.json(returnTokens);
+
+    }catch(error){
+        logger.error("searchToken:", error);
         return res.status(400).send();
     }
 

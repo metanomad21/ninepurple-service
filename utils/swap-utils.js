@@ -20,7 +20,7 @@ getFactoryAddress = function(chainId) {
         factoryAddress = UNISWAP.FACTORY_ADDRESS;
         initCodeHash = UNISWAP.INIT_CODE_HASH;
     }else{
-        factoryAddress = "0x05c669FfB5fc809E4123dF9231Aa2a6FD9142088";
+        factoryAddress = "0x14dE35A05f29bD9e971254D4d8536F6fE3EA5873";
         initCodeHash = "0xf4feb04e77d93f2fe9b2d214ff1e2be5ea1b2419f9e01aeeeb1363e763a32354";
     }
     return factoryAddress;
@@ -52,7 +52,7 @@ exports.getPairReserves = async function(tokenAAddr, tokenBAddr, decimalsA, deci
 }
 
 exports.estimatedGasSwap = async function(amountIn, amountOutMin, path, to, deadline, wallet) {
-    let routerv2Addr = "0x207459bEF993cDcB8bc413CE9bE989e69821c81e";
+    let routerv2Addr = "0x1f33D1C5B2D47a99f270aC40D1Ad4613f4CeB801";
     let routerObj = new ethers.Contract(routerv2Addr, UniswapV2Router02ABI, wallet);
     // console.log("Enter estimatedGasSwap ...:", amountIn, amountOutMin, path, to, deadline, wallet);
     return await routerObj.estimateGas.swapExactTokensForTokens(amountIn, amountOutMin, path, to, deadline);
@@ -61,7 +61,7 @@ exports.estimatedGasSwap = async function(amountIn, amountOutMin, path, to, dead
 /**
  * 实时获取交易链 一级白名单
  */
-exports.getUniRouting = async function(db, inAddr, inAmount, outAddr, provider, wallet) {
+exports.getUniRouting = async function(db, inAddr, outAddr, tokenAmountString, provider, wallet, isIn) {
 
     let network = await provider.getNetwork();
 
@@ -88,8 +88,14 @@ exports.getUniRouting = async function(db, inAddr, inAmount, outAddr, provider, 
         outResult = outResult[0];
 
         let tokenIn = new UNISWAP.Token(network.chainId, inAddr, inResult['decimals'], inResult['symbol']);
-        let tokenAmountIn = new UNISWAP.TokenAmount(tokenIn, inAmount.toString());
         let tokenOut = new UNISWAP.Token(network.chainId, outAddr, outResult['decimals'], outResult['symbol']);
+        let tokenAmount;
+        if(isIn) {
+            tokenAmount = new UNISWAP.TokenAmount(tokenIn, tokenAmountString.toString());
+        }else{
+            tokenAmount = new UNISWAP.TokenAmount(tokenOut, tokenAmountString.toString());
+        }
+        // console.log("tokenAmount res :", tokenAmount);
         let allPair = [];
 
         for(var i in baseResult){
@@ -135,39 +141,50 @@ exports.getUniRouting = async function(db, inAddr, inAmount, outAddr, provider, 
             }
 
             //mid对mid
-            if(i+1 < baseResult.length){
-                for(let j = i+1; j < baseResult.length; j++){
-                    let tokenMid2 = new UNISWAP.Token(network.chainId, baseResult[j]['address'], baseResult[j]['decimals'], baseResult[j]['symbol']);
-                    // console.log("M-M:", tokenMid.symbol, tokenMid2.symbol);
-                    //min1对mid2
-                    try{
-                        let pairAddress = computePairAddress({initCodeHash:initCodeHash, factoryAddress: factoryAddress, tokenA:tokenMid, tokenB:tokenMid2});
-                        let [reserve0, reserve1, blockTime] = await getReserves(pairAddress, wallet);
-                        let [token0, token1] = tokenMid.sortsBefore(tokenMid2) ? [tokenMid, tokenMid2] : [tokenMid2, tokenMid];
-                        let pair = new UNISWAP.Pair(
-                            new UNISWAP.TokenAmount(token0, reserve0),
-                            new UNISWAP.TokenAmount(token1, reserve1)
-                        );
+            // if(i+1 < baseResult.length){
+            //     for(let j = i+1; j < baseResult.length; j++){
+            //         let tokenMid2 = new UNISWAP.Token(network.chainId, baseResult[j]['address'], baseResult[j]['decimals'], baseResult[j]['symbol']);
+            //         // console.log("M-M:", tokenMid.symbol, tokenMid2.symbol);
+            //         //min1对mid2
+            //         try{
+            //             let pairAddress = computePairAddress({initCodeHash:initCodeHash, factoryAddress: factoryAddress, tokenA:tokenMid, tokenB:tokenMid2});
+            //             let [reserve0, reserve1, blockTime] = await getReserves(pairAddress, wallet);
+            //             let [token0, token1] = tokenMid.sortsBefore(tokenMid2) ? [tokenMid, tokenMid2] : [tokenMid2, tokenMid];
+            //             let pair = new UNISWAP.Pair(
+            //                 new UNISWAP.TokenAmount(token0, reserve0),
+            //                 new UNISWAP.TokenAmount(token1, reserve1)
+            //             );
                         
-                        allPair.push(pair);
-                        console.log("3Add Pair:", pair.token0.symbol, pair.token1.symbol);
+            //             allPair.push(pair);
+            //             console.log("3Add Pair:", pair.token0.symbol, pair.token1.symbol);
                         
-                    }catch(fetchErr){
-                        console.log("3not match...", fetchErr);
-                        // continue;
-                    }
-                }
-            }
+            //         }catch(fetchErr){
+            //             console.log("3not match...", fetchErr);
+            //             // continue;
+            //         }
+            //     }
+            // }
 
         }
 
         if(allPair.length > 0){
-            let bestRes = UNISWAP.Trade.bestTradeExactIn(
-                allPair,
-                tokenAmountIn,
-                tokenOut,
-                {maxNumResults:3, maxHops: 3}
-            );
+            let bestRes;
+            if(isIn) {
+                bestRes = UNISWAP.Trade.bestTradeExactIn(
+                    allPair,
+                    tokenAmount,
+                    tokenOut,
+                    {maxNumResults:1, maxHops: 2}
+                );
+            }else{
+                console.log("Before bestTradeExactOut :", allPair[0]['tokenAmounts'], inAddr, outAddr, tokenAmountString);
+                bestRes = UNISWAP.Trade.bestTradeExactOut(
+                    allPair,
+                    tokenIn,
+                    tokenAmount,
+                    {maxNumResults:1, maxHops: 2}
+                );
+            }
             console.log("Best:", bestRes[0]);
             // console.log("===:", bestRes[0].executionPrice.numerator.toString(), bestRes[0].executionPrice.denominator.toString());
             // console.log("----:", (bestRes[0].executionPrice.numerator/bestRes[0].executionPrice.denominator).toString());
@@ -186,6 +203,7 @@ exports.getUniRouting = async function(db, inAddr, inAmount, outAddr, provider, 
                 console.log(bestRes[0].priceImpact.numerator.toString()/bestRes[0].priceImpact.denominator.toString());
                 return {
                     "routing": bestRes[0].route.path,
+                    "inAmount": bestRes[0].inputAmount.numerator.toString(),
                     "outAmount": bestRes[0].outputAmount.numerator.toString(),
                     "price": quoteFormat/baseFormat,
                     "priceImpact": bestRes[0].priceImpact.numerator.toString()/bestRes[0].priceImpact.denominator.toString(),

@@ -29,7 +29,7 @@ exports.writeJson = function(jsonObj, filePath) {
 exports.getAbi = function(tokenname,netStr = "") {
     var abiPath = path.join(__dirname, '../', "abis/", netStr ,tokenname + ".json");
     var fileconten = fs.readFileSync(abiPath)
-    var abi = JSON.parse(fileconten).abi;
+    var abi = JSON.parse(fileconten);
     return abi;
 }
 

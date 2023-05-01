@@ -2,7 +2,7 @@ const mysql = require('mysql');
 
 var pool = null;
 
-let init = function (host, user, password, database){
+let init = function (host, user, password, database, port){
   if(!host){
     host = 'localhost';
   }
@@ -15,6 +15,9 @@ let init = function (host, user, password, database){
   if(!database){
     database = 'mg-server';
   }
+  if(!port){
+    port = 3306;
+  }
 
   if(pool == null){
     pool = mysql.createPool({
@@ -23,6 +26,7 @@ let init = function (host, user, password, database){
       user: user,
       password: password,
       database: database,
+      port: port,
       multipleStatements: true
     });
   }
